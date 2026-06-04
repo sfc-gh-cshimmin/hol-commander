@@ -278,6 +278,7 @@ st.session_state.setdefault("dataops_connected", False)
 st.session_state.setdefault("dataops_auth_method", None)
 st.session_state.setdefault("account_locators", [])
 st.session_state.setdefault("account_locators_expanded", False)
+st.session_state.setdefault("active_services", set())
 
 
 # =============================================================================
@@ -1228,6 +1229,10 @@ if accounts:
         st.session_state.last_account_ids = all_account_ids
         for acc in accounts:
             st.session_state[f"acc_{acc['account_id']}"] = False
+        # Enable parallelism by default when event has more than 1 active account
+        if len(accounts) > 1:
+            st.session_state.parallel_execution = True
+            st.session_state.parallel_workers = 5
 
     source_label = "API" if account_source == "api" else "CSV"
     st.caption(f":material/info: **{len(accounts)}** account(s) loaded from {source_label}")
@@ -1356,6 +1361,7 @@ with st.container(border=True):
             checked = st.checkbox(
                 "enable",
                 key=f"svc_{svc_key}",
+                value=svc_key in st.session_state.active_services,
                 label_visibility="collapsed"
             )
         with col2:
@@ -1369,6 +1375,9 @@ with st.container(border=True):
 
         if checked:
             selected_services.append(svc_key)
+            st.session_state.active_services.add(svc_key)
+        else:
+            st.session_state.active_services.discard(svc_key)
 
 # =============================================================================
 # Section 4: Apply
