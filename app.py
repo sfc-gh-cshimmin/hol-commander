@@ -39,11 +39,6 @@ def _hol_temp_password() -> str:
     return st.secrets.get("HOL_TEMP_PASSWORD", "")
 
 
-def _gitlab_api_token() -> str:
-    """Return the GitLab API token from session state (populated from secrets/env/user input)."""
-    return st.session_state.get("gitlab_api_token", "")
-
-
 HARDCODED_EVENTS = [
     {"slug": "launchpad-industry-demos", "name": "Launchpad Industry Demos"},
 ]
@@ -930,17 +925,26 @@ def _run_apply_job(
 # Sidebar — DataOps API Configuration
 # =============================================================================
 
+# Resolve API token: secrets.toml > env var > manual input
+_token_from_secrets = st.secrets.get("GITLAB_API_TOKEN", "") or os.environ.get("DATAOPS_API_TOKEN", "") or os.environ.get("GITLAB_API_TOKEN", "")
+_token_is_preconfigured = bool(_token_from_secrets)
+
 with st.sidebar:
     st.header(":material/key: DataOps API")
 
-    default_token = os.environ.get("DATAOPS_API_TOKEN", "")
-    api_token = st.text_input(
-        "API Token",
-        value=default_token,
-        type="password",
-        help="Personal Access Token from https://app.dataops.live/-/profile/personal_access_tokens",
-        placeholder="glpat-xxxxxxxxxxxxxxxxxxxx",
-    )
+    if _token_is_preconfigured:
+        # Token is configured via secrets/env — don't show the input field
+        api_token = _token_from_secrets
+        st.success("Token configured via secrets", icon=":material/check_circle:")
+    else:
+        # No pre-configured token — show input field
+        api_token = st.text_input(
+            "GitLab API Token",
+            value="",
+            type="password",
+            help="GitLab API token from https://app.dataops.live/-/profile/personal_access_tokens. Can also be set in .streamlit/secrets.toml as GITLAB_API_TOKEN.",
+            placeholder="glpat-xxxxxxxxxxxxxxxxxxxx",
+        )
 
     if api_token:
         client = DataOpsClient(api_token)
@@ -961,34 +965,10 @@ with st.sidebar:
             client = None
     else:
         client = None
-        st.caption("Enter your DataOps.live PAT to enable API features")
+        st.session_state.dataops_connected = False
 
     st.divider()
-    st.caption("Token is tried as PAT (`private-token` header) first, then as Bearer token. Some endpoints may require a different method.")
-
-    # --- GitLab API Token ---
-    st.divider()
-    st.header(":material/code: GitLab API")
-
-    # Resolve GitLab API token: secrets.toml > env var > session state > None
-    _gitlab_token_default = st.secrets.get("GITLAB_API_TOKEN", "") or os.environ.get("GITLAB_API_TOKEN", "")
-    if _gitlab_token_default:
-        st.session_state.setdefault("gitlab_api_token", _gitlab_token_default)
-
-    gitlab_token = st.text_input(
-        "GitLab API Token",
-        value=st.session_state.get("gitlab_api_token", ""),
-        type="password",
-        help="GitLab API token with API access. Store in .streamlit/secrets.toml as GITLAB_API_TOKEN or set GITLAB_API_TOKEN env var.",
-        placeholder="glpat-xxxxxxxxxxxxxxxxxxxx",
-    )
-
-    if gitlab_token:
-        st.session_state.gitlab_api_token = gitlab_token
-        st.success("GitLab API token configured", icon=":material/check_circle:")
-    else:
-        st.session_state.gitlab_api_token = ""
-        st.caption("Enter your GitLab API token to enable GitLab features")
+    st.caption("Token is tried as PAT (`private-token` header) first, then as Bearer token.")
 
 # =============================================================================
 # Main UI
@@ -998,13 +978,12 @@ st.title("DataOps.live Hands-On Lab Commander")
 st.caption("Apply administrative operations across Snowflake hands-on lab accounts")
 
 # --- GitLab API token unconfigured warning panel ---
-if not st.session_state.get("gitlab_api_token"):
+if not _token_is_preconfigured and not api_token:
     with st.container(border=True):
         st.warning(
-            ":material/vpn_key: **GitLab API token not configured** — Enter your GitLab API token in the sidebar to enable GitLab features.",
+            ":material/vpn_key: **GitLab API token not configured** — Enter your token in the sidebar, or set `GITLAB_API_TOKEN` in `.streamlit/secrets.toml`.",
             icon=":material/warning:",
         )
-        st.caption("You can also set `GITLAB_API_TOKEN` in `.streamlit/secrets.toml` or as an environment variable.")
 
 # =============================================================================
 # Section 1: Event Selection (API-driven)
