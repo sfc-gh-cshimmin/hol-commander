@@ -39,9 +39,9 @@ def _hol_temp_password() -> str:
     return st.secrets.get("HOL_TEMP_PASSWORD", "")
 
 
-def _gitlab_pat() -> str:
-    """Return the GitLab PAT from session state (populated from secrets/env/user input)."""
-    return st.session_state.get("gitlab_pat", "")
+def _gitlab_api_token() -> str:
+    """Return the GitLab API token from session state (populated from secrets/env/user input)."""
+    return st.session_state.get("gitlab_api_token", "")
 
 
 HARDCODED_EVENTS = [
@@ -966,29 +966,29 @@ with st.sidebar:
     st.divider()
     st.caption("Token is tried as PAT (`private-token` header) first, then as Bearer token. Some endpoints may require a different method.")
 
-    # --- GitLab PAT ---
+    # --- GitLab API Token ---
     st.divider()
-    st.header(":material/code: GitLab PAT")
+    st.header(":material/code: GitLab API")
 
-    # Resolve GitLab PAT: secrets.toml > env var > session state > None
-    _gitlab_pat_default = st.secrets.get("GITLAB_PAT", "") or os.environ.get("GITLAB_PAT", "")
-    if _gitlab_pat_default:
-        st.session_state.setdefault("gitlab_pat", _gitlab_pat_default)
+    # Resolve GitLab API token: secrets.toml > env var > session state > None
+    _gitlab_token_default = st.secrets.get("GITLAB_API_TOKEN", "") or os.environ.get("GITLAB_API_TOKEN", "")
+    if _gitlab_token_default:
+        st.session_state.setdefault("gitlab_api_token", _gitlab_token_default)
 
-    gitlab_pat = st.text_input(
-        "GitLab Personal Access Token",
-        value=st.session_state.get("gitlab_pat", ""),
+    gitlab_token = st.text_input(
+        "GitLab API Token",
+        value=st.session_state.get("gitlab_api_token", ""),
         type="password",
-        help="GitLab PAT with API access. Store in .streamlit/secrets.toml as GITLAB_PAT or set GITLAB_PAT env var.",
+        help="GitLab API token with API access. Store in .streamlit/secrets.toml as GITLAB_API_TOKEN or set GITLAB_API_TOKEN env var.",
         placeholder="glpat-xxxxxxxxxxxxxxxxxxxx",
     )
 
-    if gitlab_pat:
-        st.session_state.gitlab_pat = gitlab_pat
-        st.success("GitLab PAT configured", icon=":material/check_circle:")
+    if gitlab_token:
+        st.session_state.gitlab_api_token = gitlab_token
+        st.success("GitLab API token configured", icon=":material/check_circle:")
     else:
-        st.session_state.gitlab_pat = ""
-        st.caption("Enter your GitLab PAT to enable GitLab features")
+        st.session_state.gitlab_api_token = ""
+        st.caption("Enter your GitLab API token to enable GitLab features")
 
 # =============================================================================
 # Main UI
@@ -997,14 +997,14 @@ with st.sidebar:
 st.title("DataOps.live Hands-On Lab Commander")
 st.caption("Apply administrative operations across Snowflake hands-on lab accounts")
 
-# --- GitLab PAT unconfigured warning panel ---
-if not st.session_state.get("gitlab_pat"):
+# --- GitLab API token unconfigured warning panel ---
+if not st.session_state.get("gitlab_api_token"):
     with st.container(border=True):
         st.warning(
-            ":material/vpn_key: **GitLab PAT not configured** — Enter your GitLab Personal Access Token in the sidebar to enable GitLab features.",
+            ":material/vpn_key: **GitLab API token not configured** — Enter your GitLab API token in the sidebar to enable GitLab features.",
             icon=":material/warning:",
         )
-        st.caption("You can also set `GITLAB_PAT` in `.streamlit/secrets.toml` or as an environment variable.")
+        st.caption("You can also set `GITLAB_API_TOKEN` in `.streamlit/secrets.toml` or as an environment variable.")
 
 # =============================================================================
 # Section 1: Event Selection (API-driven)
