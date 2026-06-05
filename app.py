@@ -7,6 +7,7 @@ import os
 import re
 import json
 import time
+import logging
 import pathlib
 import threading
 import pandas as pd
@@ -15,6 +16,15 @@ import streamlit as st
 import snowflake.connector
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional
+
+logging.basicConfig(
+    filename=pathlib.Path.home() / "si_admin_v2.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+logger.info("App script executed (Streamlit rerun)")
 
 FAVORITES_PATH = pathlib.Path.home() / ".si_admin_favorites.json"
 
@@ -27,6 +37,11 @@ def _hol_password() -> str:
 def _hol_temp_password() -> str:
     """Return the HOL intermediate temp password from Streamlit secrets."""
     return st.secrets.get("HOL_TEMP_PASSWORD", "")
+
+
+def _gitlab_pat() -> str:
+    """Return the GitLab PAT from session state (populated from secrets/env/user input)."""
+    return st.session_state.get("gitlab_pat", "")
 
 
 HARDCODED_EVENTS = [
@@ -279,6 +294,7 @@ st.session_state.setdefault("dataops_auth_method", None)
 st.session_state.setdefault("account_locators", [])
 st.session_state.setdefault("account_locators_expanded", False)
 st.session_state.setdefault("active_services", set())
+st.session_state.setdefault("account_source_events", {})  # account_id -> event slug/name
 
 
 # =============================================================================
@@ -823,6 +839,7 @@ def _run_services_core(account: Dict, conn_user: str, conn_password: str, conn_r
         result["success"] = all_ok
 
     except Exception as e:
+        logger.error("Connection failed for %s: %s", account["conn_account"], e)
         result["error"] = str(e)
         for svc_key in service_configs:
             result["services"][svc_key] = {"success": False, "error": None}
@@ -870,6 +887,7 @@ def _run_apply_job(
             _apply_job["completed"] = len(done_map)
             _apply_job["circles"] = circles
 
+    logger.info("Apply job started: %d accounts, parallel=%s, max_workers=%d", total, parallel, max_workers)
     try:
         if parallel:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -905,6 +923,7 @@ def _run_apply_job(
             _apply_job["running"] = False
             _apply_job["cancelled"] = _apply_job["cancel"].is_set()
             _apply_job["status"] = "Cancelled." if _apply_job["cancelled"] else "Done!"
+        logger.info("Apply job finished: completed=%d/%d, cancelled=%s", len(done_map), total, _apply_job["cancelled"])
 
 
 # =============================================================================
@@ -947,12 +966,45 @@ with st.sidebar:
     st.divider()
     st.caption("Token is tried as PAT (`private-token` header) first, then as Bearer token. Some endpoints may require a different method.")
 
+    # --- GitLab PAT ---
+    st.divider()
+    st.header(":material/code: GitLab PAT")
+
+    # Resolve GitLab PAT: secrets.toml > env var > session state > None
+    _gitlab_pat_default = st.secrets.get("GITLAB_PAT", "") or os.environ.get("GITLAB_PAT", "")
+    if _gitlab_pat_default:
+        st.session_state.setdefault("gitlab_pat", _gitlab_pat_default)
+
+    gitlab_pat = st.text_input(
+        "GitLab Personal Access Token",
+        value=st.session_state.get("gitlab_pat", ""),
+        type="password",
+        help="GitLab PAT with API access. Store in .streamlit/secrets.toml as GITLAB_PAT or set GITLAB_PAT env var.",
+        placeholder="glpat-xxxxxxxxxxxxxxxxxxxx",
+    )
+
+    if gitlab_pat:
+        st.session_state.gitlab_pat = gitlab_pat
+        st.success("GitLab PAT configured", icon=":material/check_circle:")
+    else:
+        st.session_state.gitlab_pat = ""
+        st.caption("Enter your GitLab PAT to enable GitLab features")
+
 # =============================================================================
 # Main UI
 # =============================================================================
 
 st.title("DataOps.live Hands-On Lab Commander")
 st.caption("Apply administrative operations across Snowflake hands-on lab accounts")
+
+# --- GitLab PAT unconfigured warning panel ---
+if not st.session_state.get("gitlab_pat"):
+    with st.container(border=True):
+        st.warning(
+            ":material/vpn_key: **GitLab PAT not configured** — Enter your GitLab Personal Access Token in the sidebar to enable GitLab features.",
+            icon=":material/warning:",
+        )
+        st.caption("You can also set `GITLAB_PAT` in `.streamlit/secrets.toml` or as an environment variable.")
 
 # =============================================================================
 # Section 1: Event Selection (API-driven)
@@ -1037,7 +1089,7 @@ if client and st.session_state.dataops_connected:
                 if evt_location:
                     display += f" — {evt_location}"
 
-                c1, c2, c3 = st.columns([6, 1, 1])
+                c1, c2, c3, c4 = st.columns([6, 1, 1, 1])
                 with c1:
                     st.markdown(display)
                 with c2:
@@ -1047,12 +1099,51 @@ if client and st.session_state.dataops_connected:
                         st.session_state.api_accounts_raw = []
                         st.rerun()
                 with c3:
+                    if st.button(":material/add:", key=f"merge_evt_{idx}", help="Add accounts from this event to current pool"):
+                        st.session_state._merge_event_slug = evt_slug
+                        st.session_state._merge_event_name = evt_name
+                        st.rerun()
+                with c4:
                     if st.button(":material/star:", key=f"fav_evt_{idx}", help="Pin to quick access"):
                         add_favorite(evt_slug, evt_name)
                         st.rerun()
 
         with st.expander(":material/bug_report: Debug: Raw event search results", expanded=False):
             st.json(st.session_state.event_search_results[:5])
+
+    # --- Merge accounts from another event into current pool ---
+    if st.session_state.get("_merge_event_slug"):
+        merge_slug = st.session_state._merge_event_slug
+        merge_name = st.session_state.get("_merge_event_name", merge_slug)
+        try:
+            with st.spinner(f"Fetching accounts from **{merge_name}**..."):
+                merge_raw = client.get_all_event_accounts(merge_slug)
+            merge_accounts = [api_account_to_internal(a) for a in merge_raw]
+            # Deduplicate by account_id — keep existing entries, add new ones
+            existing_ids = {a["account_id"] for a in st.session_state.api_accounts}
+            new_accounts = [a for a in merge_accounts if a["account_id"] not in existing_ids]
+            new_raw = [r for r in merge_raw if api_account_to_internal(r)["account_id"] not in existing_ids]
+            st.session_state.api_accounts.extend(new_accounts)
+            st.session_state.api_accounts_raw.extend(new_raw)
+            # Tag merged accounts with their source event
+            for acc in new_accounts:
+                st.session_state.account_source_events[acc["account_id"]] = merge_slug
+            if new_accounts:
+                st.success(
+                    f"Added **{len(new_accounts)}** account(s) from **{merge_name}** "
+                    f"({len(merge_accounts) - len(new_accounts)} duplicate(s) skipped)",
+                    icon=":material/playlist_add:",
+                )
+            else:
+                st.info(
+                    f"All **{len(merge_accounts)}** account(s) from **{merge_name}** were already in the pool",
+                    icon=":material/info:",
+                )
+        except Exception as e:
+            st.error(f"Failed to fetch accounts from {merge_name}: {e}", icon=":material/error:")
+        finally:
+            st.session_state._merge_event_slug = None
+            st.session_state._merge_event_name = None
 
     # --- Load accounts for selected event ---
     if st.session_state.selected_event_slug:
@@ -1065,6 +1156,9 @@ if client and st.session_state.dataops_connected:
                     raw_accounts = client.get_all_event_accounts(st.session_state.selected_event_slug)
                 st.session_state.api_accounts_raw = raw_accounts
                 st.session_state.api_accounts = [api_account_to_internal(a) for a in raw_accounts]
+                # Tag accounts with their source event
+                for acc in st.session_state.api_accounts:
+                    st.session_state.account_source_events[acc["account_id"]] = st.session_state.selected_event_slug
             except Exception as e:
                 st.error(f"Failed to load accounts: {e}", icon=":material/error:")
 
@@ -1176,6 +1270,7 @@ if client and st.session_state.dataops_connected:
             st.session_state.api_accounts = []
             st.session_state.api_accounts_raw = []
             st.session_state.event_search_results = []
+            st.session_state.account_source_events = {}
             st.rerun()
 
 else:
@@ -1237,18 +1332,6 @@ if accounts:
     source_label = "API" if account_source == "api" else "CSV"
     st.caption(f":material/info: **{len(accounts)}** account(s) loaded from {source_label}")
 
-    with st.container(horizontal=True):
-        if st.button("Select all", use_container_width=True):
-            st.session_state.selected_accounts = {acc["account_id"] for acc in accounts}
-            for acc in accounts:
-                st.session_state[f"acc_{acc['account_id']}"] = True
-            st.rerun()
-        if st.button("Select none", use_container_width=True):
-            st.session_state.selected_accounts = set()
-            for acc in accounts:
-                st.session_state[f"acc_{acc['account_id']}"] = False
-            st.rerun()
-
     search_col, clear_col = st.columns([11, 1], vertical_alignment="bottom")
     with search_col:
         email_search = st.text_input(
@@ -1264,7 +1347,49 @@ if accounts:
                 st.session_state.search_clear_count += 1
                 st.rerun()
 
-    visible_accounts = [acc for acc in accounts if fuzzy_match(email_search, acc["assigned_to"])]
+    # --- Event source filter (shows all events in the pool) ---
+    source_events = st.session_state.get("account_source_events", {})
+    unique_events = sorted(set(source_events.values()))
+    if unique_events:
+        st.caption("**Events in pool**")
+        with st.container(border=True):
+            # Initialize filter state for each event
+            st.session_state.setdefault("event_filter_state", {})
+            for evt in unique_events:
+                if evt not in st.session_state.event_filter_state:
+                    st.session_state.event_filter_state[evt] = True
+
+            evt_cols = st.columns(min(len(unique_events), 4))
+            for i, evt in enumerate(unique_events):
+                with evt_cols[i % min(len(unique_events), 4)]:
+                    count = sum(1 for aid, e in source_events.items() if e == evt)
+                    st.checkbox(
+                        f"{evt} ({count})",
+                        value=st.session_state.event_filter_state.get(evt, True),
+                        key=f"evt_filter_{evt}",
+                    )
+                    st.session_state.event_filter_state[evt] = st.session_state[f"evt_filter_{evt}"]
+
+        active_events = {e for e in unique_events if st.session_state.event_filter_state.get(e, True)}
+        visible_accounts = [
+            acc for acc in accounts
+            if fuzzy_match(email_search, acc["assigned_to"])
+            and source_events.get(acc["account_id"], "") in active_events
+        ]
+    else:
+        visible_accounts = [acc for acc in accounts if fuzzy_match(email_search, acc["assigned_to"])]
+
+    with st.container(horizontal=True):
+        if st.button("Select all visible", use_container_width=True):
+            for acc in visible_accounts:
+                st.session_state.selected_accounts.add(acc["account_id"])
+                st.session_state[f"acc_{acc['account_id']}"] = True
+            st.rerun()
+        if st.button("Select none", use_container_width=True):
+            st.session_state.selected_accounts = set()
+            for acc in accounts:
+                st.session_state[f"acc_{acc['account_id']}"] = False
+            st.rerun()
 
     st.markdown(f":material/manage_accounts: **Select accounts** ({len(visible_accounts)})")
     # Build a lookup of results by account_id for status indicators
