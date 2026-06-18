@@ -14,6 +14,8 @@ import pandas as pd
 import requests
 import streamlit as st
 import snowflake.connector
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional
 
@@ -37,6 +39,60 @@ def _hol_password() -> str:
 def _hol_temp_password() -> str:
     """Return the HOL intermediate temp password from Streamlit secrets."""
     return st.secrets.get("HOL_TEMP_PASSWORD", "")
+
+
+# --- Key-pair auth configuration ---
+DEFAULT_KEY_PATH = os.path.expanduser(
+    st.secrets.get("PRIVATE_KEY_PATH", "~/SI_ACCOUNTS_PEM_KEY/priv_key.pem")
+)
+DEFAULT_SERVICE_USER = st.secrets.get("SERVICE_USER", "EMERGENCY_SERVICE_USER")
+_PRIVATE_KEY_PEM_SECRET = st.secrets.get("PRIVATE_KEY_PEM", "")
+
+
+@st.cache_resource
+def _load_private_key_from_pem(pem_content: str) -> Optional[bytes]:
+    """Parse PEM content string and return DER-encoded private key bytes."""
+    try:
+        private_key = serialization.load_pem_private_key(
+            pem_content.encode(), password=None, backend=default_backend()
+        )
+        return private_key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    except Exception as e:
+        logger.error("Failed to parse PEM content from secret: %s", e)
+        return None
+
+
+@st.cache_resource
+def _load_private_key(key_path: str) -> Optional[bytes]:
+    """Load RSA private key from PEM file and return DER-encoded bytes."""
+    try:
+        with open(key_path, "rb") as key_file:
+            private_key = serialization.load_pem_private_key(
+                key_file.read(), password=None, backend=default_backend()
+            )
+        return private_key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    except FileNotFoundError:
+        logger.warning("Private key file not found: %s", key_path)
+        return None
+    except Exception as e:
+        logger.error("Failed to load private key from %s: %s", key_path, e)
+        return None
+
+
+def _get_private_key_der() -> Optional[bytes]:
+    """Resolve private key: prefer PRIVATE_KEY_PEM secret, fall back to file path."""
+    if _PRIVATE_KEY_PEM_SECRET:
+        return _load_private_key_from_pem(_PRIVATE_KEY_PEM_SECRET)
+    key_path = st.session_state.get("private_key_path", DEFAULT_KEY_PATH)
+    return _load_private_key(key_path)
 
 
 HARDCODED_EVENTS = [
@@ -113,7 +169,7 @@ class DataOpsClient:
         last_resp.raise_for_status()
         return last_resp.json()
 
-    def _post(self, path: str, json_data: Optional[dict] = None):
+    def _post(self, path: str, json_data: Optional[dict] = None, params: Optional[dict] = None):
         methods_to_try = []
         if self.auth_method:
             methods_to_try.append(self.auth_method)
@@ -128,6 +184,7 @@ class DataOpsClient:
                 f"{self.BASE_URL}{path}",
                 headers=self._headers(method),
                 json=json_data,
+                params=params,
                 timeout=30,
             )
             if resp.status_code not in (401, 403):
@@ -165,6 +222,13 @@ class DataOpsClient:
         if search:
             params["search"] = search
         return self._get(f"/event_management/events/{slug}/accounts", params)
+
+    def decommission_account(self, event_slug: str, account_id: int, remain_allocated: bool = True) -> dict:
+        """Decommission an event account via the DataOps API."""
+        return self._post(
+            f"/event_management/events/{event_slug}/accounts/{account_id}/decommission",
+            params={"remain_allocated": str(remain_allocated).lower()},
+        )
 
     def get_all_event_accounts(self, slug: str) -> List[dict]:
         all_accounts = []
@@ -251,12 +315,13 @@ def api_account_to_internal(api_acc: dict) -> dict:
     status = api_acc.get("status", "")
     url = api_acc.get("url", "")
 
-    conn_account = f"sfsehol-{identifier}".lower() if identifier else ""
+    conn_account = f"sfsehol-{identifier}".lower().replace("_", "-") if identifier else ""
 
     suffix = identifier.split("_")[-1] if "_" in identifier else slug
 
     return {
         "account_id": identifier or slug,
+        "api_id": api_acc.get("id"),  # numeric DB id for API calls (e.g. decommission)
         "suffix": suffix,
         "status": status,
         "assigned_to": email,
@@ -286,9 +351,9 @@ st.session_state.setdefault("api_accounts_raw", [])
 st.session_state.setdefault("event_search_results", [])
 st.session_state.setdefault("dataops_connected", False)
 st.session_state.setdefault("dataops_auth_method", None)
-st.session_state.setdefault("account_locators", [])
-st.session_state.setdefault("account_locators_expanded", False)
+
 st.session_state.setdefault("active_services", set())
+st.session_state.setdefault("decommission_remain_allocated", True)
 st.session_state.setdefault("account_source_events", {})  # account_id -> event slug/name
 
 
@@ -331,7 +396,7 @@ def parse_account_csv(csv_text: str) -> List[Dict]:
         url = parts[3].strip() if len(parts) > 3 else ""
 
         suffix = account_id.split('_')[-1] if '_' in account_id else account_id[-6:]
-        conn_account = f"sfsehol-{account_id}"
+        conn_account = f"sfsehol-{account_id}".replace("_", "-")
 
         accounts.append({
             "account_id": account_id,
@@ -370,6 +435,26 @@ def resolve_connection_role() -> Optional[str]:
         return None
     run_as = st.session_state.get("run_as") or "ADMIN"
     return "ACCOUNTADMIN" if run_as == "ADMIN" else None
+
+
+def resolve_connection_params() -> dict:
+    """Return kwargs for snowflake.connector.connect() (minus account/warehouse)."""
+    auth_mode = st.session_state.get("auth_mode", "keypair")
+
+    if auth_mode == "keypair":
+        service_user = st.session_state.get("service_user", DEFAULT_SERVICE_USER)
+        private_key_der = _get_private_key_der()
+        if private_key_der is None:
+            raise RuntimeError("Cannot load private key (check PRIVATE_KEY_PEM secret or file path)")
+        return {"user": service_user, "private_key": private_key_der, "role": "ACCOUNTADMIN"}
+
+    # Password mode — existing logic
+    conn_user, conn_password = resolve_connection_credentials()
+    conn_role = resolve_connection_role()
+    params = {"user": conn_user, "password": conn_password}
+    if conn_role:
+        params["role"] = conn_role
+    return params
 
 
 def get_password_reset_statements() -> List[str]:
@@ -502,28 +587,6 @@ def get_consumption_queries() -> List[Dict]:
     ]
 
 
-def fetch_account_locator(acc: Dict) -> Dict:
-    """Connect to a single account and retrieve its Snowflake account locator."""
-    entry = {"account_id": acc["account_id"], "conn_account": acc["conn_account"], "locator": None, "error": None}
-    try:
-        conn_user, conn_password = resolve_connection_credentials()
-        conn_role = resolve_connection_role()
-        conn = snowflake.connector.connect(
-            account=acc["conn_account"],
-            user=conn_user,
-            password=conn_password,
-            warehouse="COMPUTE_WH",
-            **({"role": conn_role} if conn_role else {}),
-        )
-        cursor = conn.cursor()
-        cursor.execute("SELECT CURRENT_ACCOUNT()")
-        row = cursor.fetchone()
-        entry["locator"] = row[0] if row else None
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        entry["error"] = str(e)
-    return entry
 
 
 def render_consumption_dashboard(results: List[Dict]):
@@ -708,6 +771,57 @@ def render_custom_sql_config():
         st.caption(f":material/code: **{len(stmts)}** statement(s) will be executed per account")
 
 
+# --- Decommission service helpers ---
+
+def render_decommission_config():
+    st.checkbox(
+        "Keep account allocated after decommission",
+        key="decommission_remain_allocated",
+        help="If checked, the account remains allocated to the user but is decommissioned. If unchecked, the account is also deallocated.",
+    )
+
+
+def get_decommission_preview() -> str:
+    remain = st.session_state.get("decommission_remain_allocated", True)
+    return f"POST /event_management/events/{{event_slug}}/accounts/{{id}}/decommission?remain_allocated={str(remain).lower()}"
+
+
+def execute_decommission(client: "DataOpsClient", event_slug: str, account: Dict, config: Dict = None) -> Dict:
+    """Execute decommission API call for a single account."""
+    remain = config.get("remain_allocated", True) if config else True
+    api_id = account.get("api_id") or account.get("_raw", {}).get("id")
+    if not api_id:
+        raise ValueError(f"No numeric API id found for account {account.get('account_id')}")
+    try:
+        return client.decommission_account(event_slug, int(api_id), remain_allocated=remain)
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 500:
+            # 500 may mean the action succeeded but the server crashed post-commit.
+            # Verify by re-fetching the account status.
+            try:
+                acc_resp = client._get(f"/event_management/events/{event_slug}/accounts/{api_id}")
+                status = acc_resp.get("status", "").lower() if isinstance(acc_resp, dict) else ""
+                if "decommission" in status:
+                    return {
+                        "message": "Decommission likely succeeded (server returned 500 but account status is now decommissioned)",
+                        "message_code": "decommission_500_but_verified",
+                        "account_id": int(api_id),
+                        "account_name": account.get("account_id", ""),
+                        "status": status,
+                        "deallocated": not remain,
+                    }
+            except Exception:
+                pass  # Verification failed, fall through to original error
+        # Surface the response body for better error messages
+        body = ""
+        if e.response is not None:
+            try:
+                body = e.response.json()
+            except Exception:
+                body = e.response.text[:500]
+        raise RuntimeError(f"Decommission API error ({e.response.status_code}): {body}") from e
+
+
 SERVICES = {
     "password_reset": {
         "service_type": "action",
@@ -735,6 +849,15 @@ SERVICES = {
     #     "get_queries": get_consumption_queries,
     #     "render_results": render_consumption_results,
     # },
+    "account_locator": {
+        "service_type": "output",
+        "label": "Get account locator",
+        "description": "Retrieves the Snowflake account locator (CURRENT_ACCOUNT()) for each selected account.",
+        "icon": ":material/pin:",
+        "get_statements": lambda: ["SELECT CURRENT_ACCOUNT() AS ACCOUNT_LOCATOR"],
+        "get_preview": lambda: "SELECT CURRENT_ACCOUNT() AS ACCOUNT_LOCATOR",
+        "output_column": "ACCOUNT_LOCATOR",
+    },
     "custom_sql": {
         "service_type": "custom_sql",
         "label": "Run custom SQL",
@@ -743,6 +866,15 @@ SERVICES = {
         "get_statements": get_custom_sql_statements,
         "get_preview": get_custom_sql_preview,
         "render_config": render_custom_sql_config,
+    },
+    "decommission": {
+        "service_type": "api_action",
+        "label": "Decommission account",
+        "description": "Decommissions the account via the DataOps API. This resets the account to a clean state for reuse.",
+        "icon": ":material/delete_sweep:",
+        "render_config": render_decommission_config,
+        "get_preview": get_decommission_preview,
+        "execute": execute_decommission,
     },
 }
 
@@ -761,11 +893,16 @@ def resolve_service_configs(selected_services: List[str]) -> Dict[str, Dict]:
             cfg["queries"] = svc["get_queries"]()
         if "render_results" in svc:
             cfg["render_results"] = svc["render_results"]
+        if cfg["service_type"] == "api_action":
+            cfg["execute"] = svc["execute"]
+            cfg["remain_allocated"] = st.session_state.get("decommission_remain_allocated", True)
+        if "output_column" in svc:
+            cfg["output_column"] = svc["output_column"]
         configs[svc_key] = cfg
     return configs
 
 
-def _run_services_core(account: Dict, conn_user: str, conn_password: str, conn_role: Optional[str], service_configs: Dict[str, Dict]) -> Dict:
+def _run_services_core(account: Dict, conn_params: dict, service_configs: Dict[str, Dict], api_client=None, event_slug: Optional[str] = None) -> Dict:
     """Thread-safe core: no session_state access. All configs passed as plain data."""
     result = {
         "account_id": account["account_id"],
@@ -777,77 +914,97 @@ def _run_services_core(account: Dict, conn_user: str, conn_password: str, conn_r
         "error": None,
     }
 
-    try:
-        conn = snowflake.connector.connect(
-            account=account["conn_account"],
-            user=conn_user,
-            password=conn_password,
-            warehouse="COMPUTE_WH",
-            **({"role": conn_role} if conn_role else {}),
-        )
-        cursor = conn.cursor()
+    all_ok = True
 
-        all_ok = True
-        for svc_key, cfg in service_configs.items():
-            svc_result = {"success": False, "error": None}
-            try:
-                if cfg["service_type"] == "metrics":
-                    panels = []
-                    for q in cfg["queries"]:
-                        cursor.execute(q["sql"])
-                        rows = cursor.fetchall()
-                        columns = [d[0] for d in cursor.description] if cursor.description else []
-                        panels.append({"label": q["label"], "columns": columns, "rows": rows})
-                    svc_result["data"] = panels
-                    svc_result["success"] = True
-                elif cfg["service_type"] == "custom_sql":
-                    stmt_results = []
-                    for stmt in cfg["statements"]:
-                        sr = {"sql": stmt, "success": False, "error": None, "columns": None, "rows": None}
-                        try:
-                            cursor.execute(stmt)
-                            desc = cursor.description
+    # --- Handle API-action services first (no Snowflake connection needed) ---
+    api_configs = {k: v for k, v in service_configs.items() if v.get("service_type") == "api_action"}
+    sql_configs = {k: v for k, v in service_configs.items() if v.get("service_type") != "api_action"}
+
+    for svc_key, cfg in api_configs.items():
+        svc_result = {"success": False, "error": None}
+        try:
+            if not api_client:
+                raise ValueError("DataOps API client not available for api_action service")
+            if not event_slug:
+                raise ValueError("Event slug not available for api_action service")
+            resp = cfg["execute"](api_client, event_slug, account, cfg)
+            svc_result["success"] = True
+            svc_result["data"] = resp
+        except Exception as e:
+            svc_result["error"] = str(e)
+            all_ok = False
+        result["services"][svc_key] = svc_result
+
+    # --- Handle SQL-based services (need Snowflake connection) ---
+    if sql_configs:
+        try:
+            conn = snowflake.connector.connect(
+                account=account["conn_account"],
+                warehouse="COMPUTE_WH",
+                **conn_params,
+            )
+            cursor = conn.cursor()
+
+            for svc_key, cfg in sql_configs.items():
+                svc_result = {"success": False, "error": None}
+                try:
+                    if cfg["service_type"] == "metrics":
+                        panels = []
+                        for q in cfg["queries"]:
+                            cursor.execute(q["sql"])
                             rows = cursor.fetchall()
-                            if desc and rows:
-                                sr["columns"] = [col[0] for col in desc]
-                                sr["rows"] = [list(r) for r in rows[:50]]
-                            sr["success"] = True
-                        except Exception as stmt_e:
-                            sr["error"] = str(stmt_e)
-                        stmt_results.append(sr)
-                    svc_result["statement_results"] = stmt_results
-                    if all(s["success"] for s in stmt_results):
+                            columns = [d[0] for d in cursor.description] if cursor.description else []
+                            panels.append({"label": q["label"], "columns": columns, "rows": rows})
+                        svc_result["data"] = panels
                         svc_result["success"] = True
+                    elif cfg["service_type"] in ("custom_sql", "output"):
+                        stmt_results = []
+                        for stmt in cfg["statements"]:
+                            sr = {"sql": stmt, "success": False, "error": None, "columns": None, "rows": None}
+                            try:
+                                cursor.execute(stmt)
+                                desc = cursor.description
+                                rows = cursor.fetchall()
+                                if desc and rows:
+                                    sr["columns"] = [col[0] for col in desc]
+                                    sr["rows"] = [list(r) for r in rows[:50]]
+                                sr["success"] = True
+                            except Exception as stmt_e:
+                                sr["error"] = str(stmt_e)
+                            stmt_results.append(sr)
+                        svc_result["statement_results"] = stmt_results
+                        if all(s["success"] for s in stmt_results):
+                            svc_result["success"] = True
+                        else:
+                            all_ok = False
                     else:
-                        all_ok = False
-                else:
-                    for stmt in cfg["statements"]:
-                        cursor.execute(stmt)
-                    svc_result["success"] = True
-            except Exception as e:
-                svc_result["error"] = str(e)
-                all_ok = False
-            result["services"][svc_key] = svc_result
+                        for stmt in cfg["statements"]:
+                            cursor.execute(stmt)
+                        svc_result["success"] = True
+                except Exception as e:
+                    svc_result["error"] = str(e)
+                    all_ok = False
+                result["services"][svc_key] = svc_result
 
-        cursor.close()
-        conn.close()
-        result["success"] = all_ok
+            cursor.close()
+            conn.close()
 
-    except Exception as e:
-        logger.error("Connection failed for %s: %s", account["conn_account"], e)
-        result["error"] = str(e)
-        for svc_key in service_configs:
-            result["services"][svc_key] = {"success": False, "error": None}
+        except Exception as e:
+            logger.error("Connection failed for %s: %s", account["conn_account"], e)
+            result["error"] = str(e)
+            for svc_key in sql_configs:
+                result["services"][svc_key] = {"success": False, "error": None}
+            all_ok = False
 
+    result["success"] = all_ok
     return result
 
 
 def run_services_on_account(account: Dict, selected_services: List[str]) -> Dict:
     """Thin wrapper that resolves credentials + configs from session state then delegates to core."""
-    conn_user, conn_password = resolve_connection_credentials()
-    conn_role = resolve_connection_role()
+    conn_params = resolve_connection_params()
     service_configs = resolve_service_configs(selected_services)
-    return _run_services_core(account, conn_user, conn_password, conn_role, service_configs)
+    return _run_services_core(account, conn_params, service_configs, api_client=None, event_slug=None)
 
 
 def _circle_for_result(result: Dict) -> str:
@@ -860,11 +1017,11 @@ def _circle_for_result(result: Dict) -> str:
 def _run_apply_job(
     accounts: List[Dict],
     service_configs: Dict[str, Dict],
-    conn_user: str,
-    conn_password: str,
-    conn_role: Optional[str],
+    conn_params: dict,
     parallel: bool,
     max_workers: int,
+    api_client=None,
+    event_slug: Optional[str] = None,
 ):
     """Background thread: runs services on all accounts, writes progress to _apply_job."""
     order = [acc["account_id"] for acc in accounts]
@@ -888,7 +1045,7 @@ def _run_apply_job(
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_acc = {
                     executor.submit(
-                        _run_services_core, acc, conn_user, conn_password, conn_role, service_configs
+                        _run_services_core, acc, conn_params, service_configs, api_client, event_slug
                     ): acc
                     for acc in accounts
                 }
@@ -911,7 +1068,7 @@ def _run_apply_job(
                     _apply_job["status"] = (
                         f"Applying to {acc['suffix']} ({len(done_map) + 1}/{total})..."
                     )
-                result = _run_services_core(acc, conn_user, conn_password, conn_role, service_configs)
+                result = _run_services_core(acc, conn_params, service_configs, api_client, event_slug)
                 _record(result)
     finally:
         with _apply_lock:
@@ -1180,44 +1337,7 @@ if client and st.session_state.dataops_connected:
         if st.button(":material/refresh: Reload accounts", key="reload_accounts"):
             st.session_state.api_accounts = []
             st.session_state.api_accounts_raw = []
-            st.session_state.account_locators = []
             st.rerun()
-
-        # --- Account Locators ---
-        st.divider()
-        st.caption("**Account locators**")
-
-        if st.button(":material/pin: Fetch account locators", key="fetch_locators_btn", use_container_width=True):
-            st.session_state.account_locators = []
-            progress = st.progress(0)
-            locator_results = []
-            target_accounts = visible_api_accounts
-            for i, acc in enumerate(target_accounts):
-                locator_results.append(fetch_account_locator(acc))
-                progress.progress((i + 1) / len(target_accounts))
-            st.session_state.account_locators = locator_results
-            st.session_state.account_locators_expanded = True
-            st.rerun()
-
-        if st.session_state.get("account_locators"):
-            locators = st.session_state.account_locators
-            success_locators = [r["locator"] for r in locators if r["locator"]]
-            failed = [r for r in locators if r["error"]]
-
-            with st.expander(
-                f":material/pin: Account locators ({len(success_locators)})",
-                expanded=st.session_state.get("account_locators_expanded", False),
-            ):
-                if success_locators:
-                    st.code("\n".join(success_locators), language=None)
-                    st.caption(f"{len(success_locators)} locator(s) retrieved" + (f", {len(failed)} failed" if failed else ""))
-
-                if failed:
-                    with st.expander(f":material/error: {len(failed)} failed", expanded=False):
-                        for f in failed:
-                            st.caption(f"{f['conn_account']}: {f['error']}")
-
-            st.session_state.account_locators_expanded = False
 
         st.divider()
         st.caption("**Event actions**")
@@ -1421,40 +1541,77 @@ if accounts:
 st.subheader(":material/build: Admin services")
 st.caption("Select the operations to apply to every selected account")
 
-if st.session_state.get("target_user") not in ("USER", "ADMIN", "Custom"):
-    st.session_state["target_user"] = "USER"
+# --- Auth mode selector ---
+if st.session_state.get("auth_mode") not in ("keypair", "password"):
+    st.session_state["auth_mode"] = "keypair"
 
 st.segmented_control(
-    "Target user",
-    options=["USER", "ADMIN", "Custom"],
-    key="target_user",
-    help="Which Snowflake user to execute the services against",
+    "Auth mode",
+    options=["keypair", "password"],
+    key="auth_mode",
+    help="Key-pair uses EMERGENCY_SERVICE_USER with PEM key. Password uses ADMIN/USER with HOL password.",
 )
 
-if st.session_state.get("run_as") not in ("ADMIN", "USER"):
-    st.session_state["run_as"] = "ADMIN"
-
-st.segmented_control(
-    "Run as",
-    options=["ADMIN", "USER"],
-    key="run_as",
-    help="Which Snowflake user to connect as when executing commands",
-)
-
-if st.session_state.get("target_user") == "Custom":
+if st.session_state.get("auth_mode") == "keypair":
+    if _PRIVATE_KEY_PEM_SECRET:
+        st.success("Key configured via secret (PRIVATE_KEY_PEM)", icon=":material/check_circle:")
+    else:
+        key_path = st.text_input(
+            "PEM key path",
+            value=DEFAULT_KEY_PATH,
+            key="private_key_path",
+            help="Path to the RSA private key PEM file for EMERGENCY_SERVICE_USER",
+        )
     st.text_input(
-        "Custom username",
-        key="custom_target_user",
-        placeholder="e.g. JOHN_DOE",
-        help="Enter the Snowflake username to authenticate and run commands against",
+        "Service user",
+        value=DEFAULT_SERVICE_USER,
+        key="service_user",
+        help="Snowflake user to connect as (must have key-pair auth configured)",
     )
-    st.text_input(
-        "Custom password",
-        key="custom_target_password",
-        type="password",
-        placeholder="Enter password",
-        help="The password used to authenticate as the custom user",
+    # Validate key is loadable
+    _key_check = _get_private_key_der()
+    if _key_check:
+        if not _PRIVATE_KEY_PEM_SECRET:
+            st.success("Key loaded from file", icon=":material/check_circle:")
+    else:
+        st.error("PEM key not found or unreadable — falling back to password mode", icon=":material/error:")
+        st.session_state["auth_mode"] = "password"
+else:
+    # Password mode — show existing target user / run-as controls
+    if st.session_state.get("target_user") not in ("USER", "ADMIN", "Custom"):
+        st.session_state["target_user"] = "USER"
+
+    st.segmented_control(
+        "Target user",
+        options=["USER", "ADMIN", "Custom"],
+        key="target_user",
+        help="Which Snowflake user to execute the services against",
     )
+
+    if st.session_state.get("run_as") not in ("ADMIN", "USER"):
+        st.session_state["run_as"] = "ADMIN"
+
+    st.segmented_control(
+        "Run as",
+        options=["ADMIN", "USER"],
+        key="run_as",
+        help="Which Snowflake user to connect as when executing commands",
+    )
+
+    if st.session_state.get("target_user") == "Custom":
+        st.text_input(
+            "Custom username",
+            key="custom_target_user",
+            placeholder="e.g. JOHN_DOE",
+            help="Enter the Snowflake username to authenticate and run commands against",
+        )
+        st.text_input(
+            "Custom password",
+            key="custom_target_password",
+            type="password",
+            placeholder="Enter password",
+            help="The password used to authenticate as the custom user",
+        )
 
 selected_services = []
 
@@ -1538,8 +1695,7 @@ if st.button(
     disabled=not can_apply or _apply_job["running"],
     use_container_width=True,
 ):
-    conn_user, conn_password = resolve_connection_credentials()
-    conn_role = resolve_connection_role()
+    conn_params = resolve_connection_params()
     parallel = st.session_state.get("parallel_execution", False)
     max_workers = st.session_state.get("parallel_workers", 5)
     # Resolve all service configs NOW on the main thread — session_state is
@@ -1562,7 +1718,7 @@ if st.button(
 
     threading.Thread(
         target=_run_apply_job,
-        args=(selected_accounts_list, service_configs, conn_user, conn_password, conn_role, parallel, max_workers),
+        args=(selected_accounts_list, service_configs, conn_params, parallel, max_workers, client, st.session_state.get("selected_event_slug")),
         daemon=True,
     ).start()
     st.rerun()
@@ -1633,6 +1789,46 @@ if st.session_state.results:
 
     render_consumption_dashboard(st.session_state.results)
 
+    # --- Aggregated output panels for "output" services ---
+    output_services = {k: v for k, v in SERVICES.items() if v.get("service_type") == "output"}
+    for svc_key, svc in output_services.items():
+        output_col = svc.get("output_column")
+        values = []
+        failures = []
+        for result in st.session_state.results:
+            svc_result = result.get("services", {}).get(svc_key)
+            if not svc_result:
+                if result.get("error"):
+                    failures.append({"suffix": result["suffix"], "error": result["error"]})
+                continue
+            if svc_result.get("success"):
+                # Extract the output value from statement_results
+                for sr in svc_result.get("statement_results", []):
+                    if sr.get("success") and sr.get("columns") and sr.get("rows"):
+                        if output_col and output_col in sr["columns"]:
+                            col_idx = sr["columns"].index(output_col)
+                            for row in sr["rows"]:
+                                values.append(str(row[col_idx]))
+                        else:
+                            # Fallback: take first column value
+                            for row in sr["rows"]:
+                                values.append(str(row[0]))
+            else:
+                error = svc_result.get("error") or "Unknown error"
+                failures.append({"suffix": result["suffix"], "error": error})
+
+        if values or failures:
+            with st.expander(
+                f"{svc['icon']} **{svc['label']}** ({len(values)} collected{f', {len(failures)} failed' if failures else ''})",
+                expanded=False,
+            ):
+                if values:
+                    st.code("\n".join(values), language=None)
+                if failures:
+                    with st.expander(f":material/error: {len(failures)} failed", expanded=False):
+                        for f in failures:
+                            st.caption(f"{f['suffix']}: {f['error']}")
+
     for result in filtered_results:
         if result["success"]:
             icon = ":material/check_circle:"
@@ -1651,6 +1847,15 @@ if st.session_state.results:
             else:
                 for svc_key, svc_result in result["services"].items():
                     svc = SERVICES[svc_key]
+                    # Output services are rendered in the aggregate panel above
+                    if svc.get("service_type") == "output":
+                        if svc_result.get("success"):
+                            st.markdown(f":green-badge[OK] {svc['icon']} {svc['label']}")
+                        else:
+                            st.markdown(f":red-badge[Failed] {svc['icon']} {svc['label']}")
+                            if svc_result.get("error"):
+                                st.caption(f"Error: {svc_result['error']}")
+                        continue
                     if "render_results" in svc:
                         if svc_result["success"]:
                             render_consumption_results(svc_result.get("data", []))
