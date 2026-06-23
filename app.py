@@ -28,6 +28,31 @@ logger = logging.getLogger(__name__)
 
 logger.info("App script executed (Streamlit rerun)")
 
+
+# --- App-level password gate ---
+def _check_app_password():
+    """Block access until the user provides the correct app password."""
+    app_password = st.secrets.get("APP_PASSWORD", "")
+    if not app_password:
+        return  # No password configured — open access
+
+    if st.session_state.get("app_authenticated"):
+        return
+
+    st.title("🔒 Login Required")
+    entered = st.text_input("Password", type="password", key="_app_pw_input")
+    if st.button("Enter"):
+        if entered == app_password:
+            st.session_state["app_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+
+_check_app_password()
+
+
 FAVORITES_PATH = pathlib.Path.home() / ".si_admin_favorites.json"
 
 
@@ -344,6 +369,7 @@ st.session_state.setdefault("target_user", "USER")
 st.session_state.setdefault("run_as", "ADMIN")
 st.session_state.setdefault("parallel_execution", False)
 st.session_state.setdefault("parallel_workers", 5)
+st.session_state.setdefault("disable_mfa_comment", "Disabled for SI event")
 st.session_state.setdefault("search_clear_count", 0)
 st.session_state.setdefault("selected_event_slug", None)
 st.session_state.setdefault("api_accounts", [])
@@ -521,6 +547,46 @@ def render_mfa_config():
         key="mfa_bypass_minutes",
         help="How long MFA will be bypassed for the USER user (1-10080 minutes)",
     )
+
+
+def get_disable_mfa_ddl_template() -> str:
+    comment = st.session_state.get("disable_mfa_comment", "Disabled for SI event")
+    return f"ALTER ACCOUNT {{locator}} SET REQUIRE_SNOWSIGHT_MFA=false PARAMETER_COMMENT='{comment}';"
+
+
+def get_disable_mfa_ddl_preview() -> str:
+    return get_disable_mfa_ddl_template().replace("{locator}", "<LOCATOR>")
+
+
+def render_disable_mfa_ddl_config():
+    st.text_input(
+        "Parameter comment",
+        key="disable_mfa_comment",
+        help="Value for PARAMETER_COMMENT on the ALTER ACCOUNT statement",
+    )
+
+
+def generate_disable_mfa_ddl(locators: List[str]) -> str:
+    template = get_disable_mfa_ddl_template()
+    return "\n".join(template.replace("{locator}", loc) for loc in locators)
+
+
+def get_disable_mfa_policy_statements() -> List[str]:
+    return [
+        "USE ROLE ACCOUNTADMIN",
+        "CREATE SCHEMA IF NOT EXISTS ADMIN.UTIL",
+        "USE SCHEMA ADMIN.UTIL",
+        "CREATE AUTHENTICATION POLICY IF NOT EXISTS ADMIN.UTIL.MFA_OVERRIDE_POLICY MFA_ENROLLMENT = 'OPTIONAL'",
+        "ALTER ACCOUNT SET AUTHENTICATION POLICY MFA_OVERRIDE_POLICY",
+    ]
+
+
+def get_disable_mfa_policy_preview() -> str:
+    return """USE ROLE ACCOUNTADMIN;
+USE ADMIN.UTIL;
+CREATE AUTHENTICATION POLICY IF NOT EXISTS ADMIN.UTIL.MFA_OVERRIDE_POLICY
+    MFA_ENROLLMENT = 'OPTIONAL';
+ALTER ACCOUNT SET AUTHENTICATION POLICY MFA_OVERRIDE_POLICY;"""
 
 
 def get_consumption_queries() -> List[Dict]:
@@ -858,6 +924,27 @@ SERVICES = {
         "get_preview": lambda: "SELECT CURRENT_ACCOUNT() AS ACCOUNT_LOCATOR",
         "output_column": "ACCOUNT_LOCATOR",
     },
+    "disable_mfa_ddl": {
+        "service_type": "output",
+        "label": "Part 1: Generate ALTER ACCOUNT DDL",
+        "description": "Fetches account locators and generates ALTER ACCOUNT DDL to disable REQUIRE_SNOWSIGHT_MFA. Copy output to run in the production admin account.",
+        "icon": ":material/content_copy:",
+        "render_config": render_disable_mfa_ddl_config,
+        "get_statements": lambda: ["SELECT CURRENT_ACCOUNT() AS ACCOUNT_LOCATOR"],
+        "get_preview": get_disable_mfa_ddl_preview,
+        "output_column": "ACCOUNT_LOCATOR",
+        "render_output": generate_disable_mfa_ddl,
+        "group": "disable_account_mfa",
+    },
+    "disable_mfa_policy": {
+        "service_type": "action",
+        "label": "Part 2: Apply auth policy on accounts",
+        "description": "Creates and applies an authentication policy with MFA_ENROLLMENT='OPTIONAL' on each selected account.",
+        "icon": ":material/policy:",
+        "get_statements": get_disable_mfa_policy_statements,
+        "get_preview": get_disable_mfa_policy_preview,
+        "group": "disable_account_mfa",
+    },
     "custom_sql": {
         "service_type": "custom_sql",
         "label": "Run custom SQL",
@@ -878,6 +965,13 @@ SERVICES = {
     },
 }
 
+SERVICE_GROUPS = {
+    "disable_account_mfa": {
+        "label": "Disable account MFA",
+        "icon": ":material/shield_lock:",
+        "description": "Two-part process to disable MFA enforcement on accounts.",
+    },
+}
 
 def resolve_service_configs(selected_services: List[str]) -> Dict[str, Dict]:
     """Pre-resolve all service configs on the main Streamlit thread.
@@ -1616,7 +1710,46 @@ else:
 selected_services = []
 
 with st.container(border=True):
+    rendered_groups = set()
     for svc_key, svc in SERVICES.items():
+        group_id = svc.get("group")
+
+        # Render entire group in a sub-container the first time we see it
+        if group_id and group_id not in rendered_groups:
+            rendered_groups.add(group_id)
+            grp = SERVICE_GROUPS.get(group_id, {})
+            group_svcs = [(k, v) for k, v in SERVICES.items() if v.get("group") == group_id]
+            with st.container(border=True):
+                st.markdown(f"{grp.get('icon', '')} **{grp.get('label', group_id)}**")
+                st.caption(grp.get("description", ""))
+                for g_key, g_svc in group_svcs:
+                    col1, col2 = st.columns([1, 8], vertical_alignment="top")
+                    with col1:
+                        g_checked = st.checkbox(
+                            "enable",
+                            key=f"svc_{g_key}",
+                            value=g_key in st.session_state.active_services,
+                            label_visibility="collapsed"
+                        )
+                    with col2:
+                        st.markdown(f"{g_svc['icon']} **{g_svc['label']}**")
+                        st.caption(g_svc["description"])
+                        if "render_config" in g_svc:
+                            g_svc["render_config"]()
+                        if "get_preview" in g_svc:
+                            with st.expander("View SQL", icon=":material/code:"):
+                                st.code(g_svc["get_preview"](), language="sql")
+                    if g_checked:
+                        selected_services.append(g_key)
+                        st.session_state.active_services.add(g_key)
+                    else:
+                        st.session_state.active_services.discard(g_key)
+            continue
+
+        # Skip grouped services on subsequent encounters (already rendered above)
+        if group_id:
+            continue
+
         col1, col2 = st.columns([1, 8], vertical_alignment="top")
         with col1:
             checked = st.checkbox(
@@ -1823,7 +1956,10 @@ if st.session_state.results:
                 expanded=False,
             ):
                 if values:
-                    st.code("\n".join(values), language=None)
+                    if "render_output" in svc:
+                        st.code(svc["render_output"](values), language="sql")
+                    else:
+                        st.code("\n".join(values), language=None)
                 if failures:
                     with st.expander(f":material/error: {len(failures)} failed", expanded=False):
                         for f in failures:
