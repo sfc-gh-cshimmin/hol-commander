@@ -540,12 +540,39 @@ def get_mfa_bypass_preview() -> str:
 def render_mfa_config():
     st.number_input(
         "Minutes to disable MFA",
-        min_value=1,
+        min_value=0,
         max_value=10080,
         value=st.session_state["mfa_bypass_minutes"],
         step=15,
         key="mfa_bypass_minutes",
-        help="How long MFA will be bypassed for the USER user (1-10080 minutes)",
+        help="How long MFA will be bypassed for the USER user (0-10080 minutes). Set to 0 to disable the bypass.",
+    )
+
+
+def get_remove_mfa_method_execute():
+    """Returns a cursor-level callable that removes all MFA methods for the target user."""
+    target = resolve_target_user()
+
+    def execute(cursor):
+        cursor.execute(f"SHOW MFA METHODS FOR USER {target}")
+        rows = cursor.fetchall()
+        if not rows:
+            return
+        cols = [d[0].lower() for d in cursor.description]
+        name_idx = cols.index("name")
+        for row in rows:
+            mfa_name = row[name_idx]
+            cursor.execute(f"ALTER USER {target} REMOVE MFA METHOD {mfa_name}")
+
+    return execute
+
+
+def get_remove_mfa_method_preview() -> str:
+    target = resolve_target_user()
+    return (
+        f"SHOW MFA METHODS FOR USER {target};\n\n"
+        f"-- Then, for each row in the result:\n"
+        f"ALTER USER {target} REMOVE MFA METHOD <name>;"
     )
 
 
@@ -898,6 +925,14 @@ SERVICES = {
         "get_preview": get_password_reset_preview,
         "render_config": render_password_reset_config,
     },
+    "remove_mfa_method": {
+        "service_type": "dynamic_action",
+        "label": "Remove MFA methods",
+        "description": "Removes all registered MFA methods from the target user by first listing them via SHOW MFA METHODS, then removing each one.",
+        "icon": ":material/no_encryption:",
+        "get_execute": get_remove_mfa_method_execute,
+        "get_preview": get_remove_mfa_method_preview,
+    },
     "mfa_disable": {
         "service_type": "action",
         "label": "Disable MFA temporarily",
@@ -990,6 +1025,8 @@ def resolve_service_configs(selected_services: List[str]) -> Dict[str, Dict]:
         if cfg["service_type"] == "api_action":
             cfg["execute"] = svc["execute"]
             cfg["remain_allocated"] = st.session_state.get("decommission_remain_allocated", True)
+        if cfg["service_type"] == "dynamic_action":
+            cfg["execute"] = svc["get_execute"]()
         if "output_column" in svc:
             cfg["output_column"] = svc["output_column"]
         configs[svc_key] = cfg
@@ -1002,6 +1039,7 @@ def _run_services_core(account: Dict, conn_params: dict, service_configs: Dict[s
         "account_id": account["account_id"],
         "suffix": account["suffix"],
         "assigned_to": account.get("assigned_to", ""),
+        "url": account.get("url", ""),
         "conn_account": account["conn_account"],
         "services": {},
         "success": False,
@@ -1071,6 +1109,9 @@ def _run_services_core(account: Dict, conn_params: dict, service_configs: Dict[s
                             svc_result["success"] = True
                         else:
                             all_ok = False
+                    elif cfg["service_type"] == "dynamic_action":
+                        cfg["execute"](cursor)
+                        svc_result["success"] = True
                     else:
                         for stmt in cfg["statements"]:
                             cursor.execute(stmt)
@@ -1610,11 +1651,13 @@ if accounts:
                 else:
                     status_icon = "🔴 "
 
-            display_name = (
-                f"{acc['suffix']}** — {acc['assigned_to'][:40]}..."
+            assigned_display = (
+                f"{acc['assigned_to'][:40]}..."
                 if len(acc["assigned_to"]) > 40
-                else f"{acc['suffix']}** — {acc['assigned_to']}"
+                else acc["assigned_to"]
             )
+            url_part = f" — [{acc['url']}]({acc['url']})" if acc.get("url") else ""
+            display_name = f"{acc['suffix']}** — {assigned_display}{url_part}"
             label = f"{status_icon}**{display_name}"
 
             if st.checkbox(label, value=is_selected, key=f"acc_{acc['account_id']}"):
@@ -1974,7 +2017,9 @@ if st.session_state.results:
             status = "Failed"
 
         with st.expander(
-            f"{icon} **{result['suffix']}** {result.get('assigned_to', '')} -- {status}",
+            f"{icon} **{result['suffix']}** {result.get('assigned_to', '')}"
+            + (f" — {result['url']}" if result.get("url") else "")
+            + f" -- {status}",
             expanded=not result["success"],
             icon=icon,
         ):
