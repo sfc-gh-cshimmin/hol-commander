@@ -1297,6 +1297,8 @@ if client and st.session_state.dataops_connected:
                 st.session_state.selected_event_slug = event["slug"]
                 st.session_state.api_accounts = []
                 st.session_state.api_accounts_raw = []
+                st.session_state.account_source_events = {}
+                st.session_state.pop("event_filter_state", None)
                 st.rerun()
             if not is_hardcoded:
                 if st.button(":material/close:", key=f"unpin_{event['slug']}", help="Remove from quick access"):
@@ -1368,6 +1370,8 @@ if client and st.session_state.dataops_connected:
                         st.session_state.selected_event_slug = evt_slug
                         st.session_state.api_accounts = []
                         st.session_state.api_accounts_raw = []
+                        st.session_state.account_source_events = {}
+                        st.session_state.pop("event_filter_state", None)
                         st.rerun()
                 with c3:
                     if st.button(":material/add:", key=f"merge_evt_{idx}", help="Add accounts from this event to current pool"):
@@ -1472,6 +1476,8 @@ if client and st.session_state.dataops_connected:
         if st.button(":material/refresh: Reload accounts", key="reload_accounts"):
             st.session_state.api_accounts = []
             st.session_state.api_accounts_raw = []
+            st.session_state.account_source_events = {}
+            st.session_state.pop("event_filter_state", None)
             st.rerun()
 
         st.divider()
