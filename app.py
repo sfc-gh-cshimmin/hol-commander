@@ -1435,7 +1435,10 @@ if client and st.session_state.dataops_connected:
                 for acc in st.session_state.api_accounts:
                     st.session_state.account_source_events[acc["account_id"]] = st.session_state.selected_event_slug
             except Exception as e:
+                st.session_state["_api_load_error"] = str(e)
                 st.error(f"Failed to load accounts: {e}", icon=":material/error:")
+            else:
+                st.session_state.pop("_api_load_error", None)
 
         st.checkbox(
             "Hide decommissioned accounts",
@@ -1466,12 +1469,23 @@ if client and st.session_state.dataops_connected:
             st.warning("No accounts found for this event", icon=":material/warning:")
 
         with st.expander(":material/bug_report: Debug: Raw API response", expanded=False):
+            slug_under_test = st.session_state.selected_event_slug
+            st.caption(f"Event slug: `{slug_under_test}`")
+            if st.button("Test API call (show raw response)", key="test_api_call"):
+                try:
+                    raw_resp = client.get_event_accounts(slug_under_test, page=1, page_size=5)
+                    st.json(raw_resp)
+                except Exception as e:
+                    st.error(f"API error: {e}")
+            if st.session_state.get("_api_load_error"):
+                st.error(f"Last load error: {st.session_state['_api_load_error']}")
             if st.session_state.api_accounts_raw:
+                st.caption(f"Total accounts fetched: **{len(st.session_state.api_accounts_raw)}**")
                 st.json(st.session_state.api_accounts_raw[:3])
                 if len(st.session_state.api_accounts_raw) > 3:
                     st.caption(f"... and {len(st.session_state.api_accounts_raw) - 3} more")
-            else:
-                st.caption("No raw data available")
+            elif st.session_state.api_accounts_raw is not None:
+                st.caption("API returned 0 accounts (or load not yet attempted)")
 
         if st.button(":material/refresh: Reload accounts", key="reload_accounts"):
             st.session_state.api_accounts = []
