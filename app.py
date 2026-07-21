@@ -537,6 +537,29 @@ def get_mfa_bypass_preview() -> str:
     return "\n\n".join(s + ";" for s in get_mfa_bypass_statements())
 
 
+def render_mfa_bypass_task_config():
+    if st.session_state.get("mfa_bypass_task_action") not in ("execute", "suspend"):
+        st.session_state["mfa_bypass_task_action"] = "suspend"
+    st.segmented_control(
+        "Task action",
+        options=["execute", "suspend"],
+        key="mfa_bypass_task_action",
+        help="Execute runs the task immediately. Suspend stops the task from running on its schedule.",
+    )
+
+
+def get_mfa_bypass_task_statements():
+    if st.session_state.get("mfa_bypass_task_action") == "execute":
+        return ["EXECUTE TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS"]
+    return ["ALTER TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS SUSPEND"]
+
+
+def get_mfa_bypass_task_preview():
+    if st.session_state.get("mfa_bypass_task_action") == "execute":
+        return "EXECUTE TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS"
+    return "ALTER TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS SUSPEND"
+
+
 def render_mfa_config():
     st.number_input(
         "Minutes to disable MFA",
@@ -933,13 +956,14 @@ SERVICES = {
         "get_execute": get_remove_mfa_method_execute,
         "get_preview": get_remove_mfa_method_preview,
     },
-    "suspend_mfa_bypass_task": {
+    "mfa_bypass_task": {
         "service_type": "action",
-        "label": "Suspend MFA bypass task",
-        "description": "Suspends the MFA_USERS_BYPASS task in POLICY_DB.POLICIES to stop automatic MFA bypass processing.",
+        "label": "MFA bypass task",
+        "description": "Execute or suspend the MFA_USERS_BYPASS task in POLICY_DB.POLICIES.",
         "icon": ":material/pause_circle:",
-        "get_statements": lambda: ["ALTER TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS SUSPEND"],
-        "get_preview": lambda: "ALTER TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS SUSPEND",
+        "get_statements": get_mfa_bypass_task_statements,
+        "get_preview": get_mfa_bypass_task_preview,
+        "render_config": render_mfa_bypass_task_config,
     },
     "mfa_disable": {
         "service_type": "action",
