@@ -370,6 +370,7 @@ st.session_state.setdefault("run_as", "ADMIN")
 st.session_state.setdefault("parallel_execution", False)
 st.session_state.setdefault("parallel_workers", 5)
 st.session_state.setdefault("disable_mfa_comment", "Disabled for SI event")
+st.session_state.setdefault("mfa_bypass_task_define", False)
 st.session_state.setdefault("search_clear_count", 0)
 st.session_state.setdefault("selected_event_slug", None)
 st.session_state.setdefault("api_accounts", [])
@@ -537,7 +538,35 @@ def get_mfa_bypass_preview() -> str:
     return "\n\n".join(s + ";" for s in get_mfa_bypass_statements())
 
 
+_MFA_BYPASS_TASK_DDL = """CREATE OR REPLACE TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS
+    SCHEDULE = '23 HOURS'
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+AS
+EXECUTE IMMEDIATE $$
+DECLARE
+    user_cursor RESULTSET;
+    user_name STRING;
+    show_qid STRING;
+BEGIN
+    SHOW USERS;
+    show_qid := LAST_QUERY_ID();
+    user_cursor := (SELECT \"name\" AS USERNAME FROM TABLE(RESULT_SCAN(:show_qid)) WHERE \"disabled\" = FALSE AND \"type\" = 'PERSON');
+    FOR user_record IN user_cursor DO
+        user_name := user_record.USERNAME;
+        ALTER USER identifier(:user_name) SET MINS_TO_BYPASS_MFA = 1440;
+    END FOR;
+END;
+$$"""
+
+_MFA_BYPASS_TASK_RESUME = "ALTER TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS RESUME"
+
+
 def render_mfa_bypass_task_config():
+    st.checkbox(
+        "Define (create/replace) task first",
+        key="mfa_bypass_task_define",
+        help="Runs CREATE OR REPLACE TASK + ALTER TASK RESUME before the selected action. Use this when the task does not yet exist on the account.",
+    )
     if st.session_state.get("mfa_bypass_task_action") not in ("execute", "suspend"):
         st.session_state["mfa_bypass_task_action"] = "suspend"
     st.segmented_control(
@@ -549,15 +578,19 @@ def render_mfa_bypass_task_config():
 
 
 def get_mfa_bypass_task_statements():
+    stmts = []
+    if st.session_state.get("mfa_bypass_task_define", False):
+        stmts += [_MFA_BYPASS_TASK_DDL, _MFA_BYPASS_TASK_RESUME]
     if st.session_state.get("mfa_bypass_task_action") == "execute":
-        return ["EXECUTE TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS"]
-    return ["ALTER TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS SUSPEND"]
+        stmts.append("EXECUTE TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS")
+    else:
+        stmts.append("ALTER TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS SUSPEND")
+    return stmts
 
 
 def get_mfa_bypass_task_preview():
-    if st.session_state.get("mfa_bypass_task_action") == "execute":
-        return "EXECUTE TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS"
-    return "ALTER TASK POLICY_DB.POLICIES.MFA_USERS_BYPASS SUSPEND"
+    stmts = get_mfa_bypass_task_statements()
+    return "\n\n".join(s + ";" for s in stmts)
 
 
 def render_mfa_config():
