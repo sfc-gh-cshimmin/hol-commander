@@ -814,15 +814,85 @@ def render_consumption_results(panels: List[Dict]):
 
 def parse_sql_statements(sql_text: str) -> List[str]:
     sql_text = re.sub(r'```\w*\n?', '', sql_text).strip()
-    raw_statements = sql_text.split(';')
-    statements = []
-    for stmt in raw_statements:
-        stmt = stmt.strip()
-        if not stmt:
-            continue
-        lines = [l.strip() for l in stmt.split('\n') if l.strip() and not l.strip().startswith('--')]
-        if lines:
-            statements.append(stmt)
+
+    statements: List[str] = []
+    current: List[str] = []
+    i, n = 0, len(sql_text)
+    in_dollar_quote = False
+    in_single_quote = False
+    in_line_comment = False
+    in_block_comment = False
+
+    while i < n:
+        ch = sql_text[i]
+
+        if in_line_comment:
+            current.append(ch)
+            if ch == '\n':
+                in_line_comment = False
+            i += 1
+        elif in_block_comment:
+            if sql_text[i:i+2] == '*/':
+                current.append('*/')
+                in_block_comment = False
+                i += 2
+            else:
+                current.append(ch)
+                i += 1
+        elif in_dollar_quote:
+            if sql_text[i:i+2] == '$$':
+                current.append('$$')
+                in_dollar_quote = False
+                i += 2
+            else:
+                current.append(ch)
+                i += 1
+        elif in_single_quote:
+            current.append(ch)
+            if ch == "'":
+                if i + 1 < n and sql_text[i+1] == "'":  # escaped ''
+                    current.append("'")
+                    i += 2
+                else:
+                    in_single_quote = False
+                    i += 1
+            else:
+                i += 1
+        else:
+            if sql_text[i:i+2] == '--':
+                in_line_comment = True
+                current.append('-')
+                i += 1
+            elif sql_text[i:i+2] == '/*':
+                in_block_comment = True
+                current.append('/*')
+                i += 2
+            elif sql_text[i:i+2] == '$$':
+                in_dollar_quote = True
+                current.append('$$')
+                i += 2
+            elif ch == "'":
+                in_single_quote = True
+                current.append(ch)
+                i += 1
+            elif ch == ';':
+                stmt = ''.join(current).strip()
+                lines = [l.strip() for l in stmt.split('\n')
+                         if l.strip() and not l.strip().startswith('--')]
+                if lines:
+                    statements.append(stmt)
+                current = []
+                i += 1
+            else:
+                current.append(ch)
+                i += 1
+
+    remaining = ''.join(current).strip()
+    lines = [l.strip() for l in remaining.split('\n')
+             if l.strip() and not l.strip().startswith('--')]
+    if lines:
+        statements.append(remaining)
+
     return statements
 
 
