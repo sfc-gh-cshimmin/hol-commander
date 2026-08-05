@@ -328,6 +328,15 @@ def remove_favorite(slug: str):
 # Account mapping
 # =============================================================================
 
+def _locator_from_url(url: str) -> str:
+    """Extract account locator from https://<locator>.snowflakecomputing.com URLs."""
+    if url:
+        m = re.match(r'https?://([^.]+)\.snowflakecomputing\.com', url, re.IGNORECASE)
+        if m:
+            return m.group(1).lower()
+    return ""
+
+
 def api_account_to_internal(api_acc: dict) -> dict:
     identifier = api_acc.get("identifier", "")
     slug = api_acc.get("slug", "")
@@ -340,7 +349,7 @@ def api_account_to_internal(api_acc: dict) -> dict:
     status = api_acc.get("status", "")
     url = api_acc.get("url", "")
 
-    conn_account = f"sfsehol-{identifier}".lower().replace("_", "-") if identifier else ""
+    conn_account = _locator_from_url(url) or (f"sfsehol-{identifier}".lower().replace("_", "-") if identifier else "")
 
     suffix = identifier.split("_")[-1] if "_" in identifier else slug
 
@@ -423,7 +432,7 @@ def parse_account_csv(csv_text: str) -> List[Dict]:
         url = parts[3].strip() if len(parts) > 3 else ""
 
         suffix = account_id.split('_')[-1] if '_' in account_id else account_id[-6:]
-        conn_account = f"sfsehol-{account_id}".replace("_", "-")
+        conn_account = _locator_from_url(url) or f"sfsehol-{account_id}".replace("_", "-")
 
         accounts.append({
             "account_id": account_id,
