@@ -1014,6 +1014,19 @@ def get_decommission_preview() -> str:
     return f"POST /event_management/events/{{event_slug}}/accounts/{{id}}/decommission?remain_allocated={str(remain).lower()}"
 
 
+def get_coco_cross_region_statements() -> List[str]:
+    return [
+        "USE ROLE ACCOUNTADMIN",
+        "ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION'",
+        "GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ATTENDEE_ROLE",
+        "GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE PUBLIC",
+    ]
+
+
+def get_coco_cross_region_preview() -> str:
+    return "\n\n".join(s + ";" for s in get_coco_cross_region_statements())
+
+
 def execute_decommission(client: "DataOpsClient", event_slug: str, account: Dict, config: Dict = None) -> Dict:
     """Execute decommission API call for a single account."""
     remain = config.get("remain_allocated", True) if config else True
@@ -1124,6 +1137,14 @@ SERVICES = {
     #     "get_preview": get_disable_mfa_policy_preview,
     #     "group": "disable_account_mfa",
     # },
+    "coco_cross_region": {
+        "service_type": "action",
+        "label": "Enable CoCo cross-region",
+        "description": "Sets CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION' and grants the CORTEX_USER database role to ATTENDEE_ROLE and PUBLIC.",
+        "icon": ":material/public:",
+        "get_statements": get_coco_cross_region_statements,
+        "get_preview": get_coco_cross_region_preview,
+    },
     "custom_sql": {
         "service_type": "custom_sql",
         "label": "Run custom SQL",
