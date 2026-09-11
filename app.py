@@ -1039,6 +1039,22 @@ def get_coco_cross_region_preview() -> str:
     return "\n\n".join(s + ";" for s in get_coco_cross_region_statements())
 
 
+def get_patch_auth_policy_statements() -> List[str]:
+    return [
+        "USE ROLE ACCOUNTADMIN",
+        "ALTER ACCOUNT UNSET AUTHENTICATION POLICY",
+        """ALTER AUTHENTICATION POLICY POLICY_DB.POLICIES.event_authentication_policy SET
+  MFA_ENROLLMENT=REQUIRED
+  CLIENT_TYPES = ('ALL')
+  AUTHENTICATION_METHODS = ('ALL')""",
+        "ALTER ACCOUNT SET AUTHENTICATION POLICY POLICY_DB.POLICIES.event_authentication_policy",
+    ]
+
+
+def get_patch_auth_policy_preview() -> str:
+    return "\n\n".join(s + ";" for s in get_patch_auth_policy_statements())
+
+
 def execute_decommission(client: "DataOpsClient", event_slug: str, account: Dict, config: Dict = None) -> Dict:
     """Execute decommission API call for a single account."""
     remain = config.get("remain_allocated", True) if config else True
@@ -1149,6 +1165,14 @@ SERVICES = {
     #     "get_preview": get_disable_mfa_policy_preview,
     #     "group": "disable_account_mfa",
     # },
+    "patch_auth_policy": {
+        "service_type": "action",
+        "label": "Patch authentication policy",
+        "description": "Unsets any existing account auth policy, updates event_authentication_policy to require MFA with all client types and methods, then re-applies it to the account.",
+        "icon": ":material/policy:",
+        "get_statements": get_patch_auth_policy_statements,
+        "get_preview": get_patch_auth_policy_preview,
+    },
     "coco_cross_region": {
         "service_type": "action",
         "label": "Enable CoCo cross-region",
