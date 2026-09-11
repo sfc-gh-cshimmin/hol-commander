@@ -1015,12 +1015,24 @@ def get_decommission_preview() -> str:
 
 
 def get_coco_cross_region_statements() -> List[str]:
-    return [
+    stmts = [
         "USE ROLE ACCOUNTADMIN",
         "ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION'",
+        'GRANT APPLICATION ROLE SNOWFLAKE."CORTEX-MODEL-ROLE-ALL" TO ROLE PUBLIC',
         "GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ATTENDEE_ROLE",
         "GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE PUBLIC",
     ]
+    if st.session_state.get("coco_cross_region_refresh_models", False):
+        stmts.append("CALL SNOWFLAKE.MODELS.CORTEX_BASE_MODELS_REFRESH()")
+    return stmts
+
+
+def render_coco_cross_region_config():
+    st.checkbox(
+        "Refresh Cortex base models",
+        key="coco_cross_region_refresh_models",
+        help="Also calls SNOWFLAKE.MODELS.CORTEX_BASE_MODELS_REFRESH() after applying the account settings.",
+    )
 
 
 def get_coco_cross_region_preview() -> str:
@@ -1144,6 +1156,7 @@ SERVICES = {
         "icon": ":material/public:",
         "get_statements": get_coco_cross_region_statements,
         "get_preview": get_coco_cross_region_preview,
+        "render_config": render_coco_cross_region_config,
     },
     "custom_sql": {
         "service_type": "custom_sql",
