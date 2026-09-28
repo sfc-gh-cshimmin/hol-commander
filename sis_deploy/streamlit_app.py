@@ -15,21 +15,12 @@ from typing import List, Dict, Optional
 
 
 # =============================================================================
-# Compatibility helper
-# =============================================================================
-
-def _rerun():
-    if hasattr(st, 'rerun'):
-        st.rerun()
-    else:
-        st.experimental_rerun()
-
-# =============================================================================
 # Page configuration — must be the first Streamlit call
 # =============================================================================
 
 st.set_page_config(
     page_title="DataOps.live HOL Commander",
+    page_icon=":material/admin_panel_settings:",
     layout="wide"
 )
 
@@ -436,11 +427,10 @@ def render_mfa_bypass_task_config():
     )
     if st.session_state.get("mfa_bypass_task_action") not in ("execute", "suspend"):
         st.session_state["mfa_bypass_task_action"] = "suspend"
-    st.radio(
+    st.segmented_control(
         "Task action",
         options=["execute", "suspend"],
         key="mfa_bypass_task_action",
-        horizontal=True,
         help="Execute runs the task immediately. Suspend stops the task from running on its schedule.",
     )
 
@@ -650,7 +640,7 @@ def render_custom_sql_config():
         )
     if st.button("➕ Add SQL block", key="add_sql_block"):
         st.session_state["custom_sql_block_count"] = num_blocks + 1
-        _rerun()
+        st.rerun()
     if num_blocks > 1:
         if st.button("➖ Remove last block", key="remove_sql_block"):
             last_key = f"custom_sql_input_{num_blocks - 1}"
@@ -660,7 +650,7 @@ def render_custom_sql_config():
             if enabled_key in st.session_state:
                 del st.session_state[enabled_key]
             st.session_state["custom_sql_block_count"] = num_blocks - 1
-            _rerun()
+            st.rerun()
     stmts = get_custom_sql_statements()
     if stmts:
         st.caption(f"📝 **{len(stmts)}** statement(s) will be executed per account")
@@ -1106,11 +1096,11 @@ if client and st.session_state.dataops_connected:
                 st.session_state.api_accounts_raw = []
                 st.session_state.account_source_events = {}
                 st.session_state.pop("event_filter_state", None)
-                _rerun()
+                st.rerun()
             if not is_hardcoded:
                 if st.button("❌", key=f"unpin_{event['slug']}", help="Remove from quick access"):
                     remove_favorite(event["slug"])
-                    _rerun()
+                    st.rerun()
 
     # --- Event Search ---
     st.caption("**Search events**")
@@ -1179,16 +1169,16 @@ if client and st.session_state.dataops_connected:
                         st.session_state.api_accounts_raw = []
                         st.session_state.account_source_events = {}
                         st.session_state.pop("event_filter_state", None)
-                        _rerun()
+                        st.rerun()
                 with c3:
                     if st.button("➕", key=f"merge_evt_{idx}", help="Add accounts from this event"):
                         st.session_state._merge_event_slug = evt_slug
                         st.session_state._merge_event_name = evt_name
-                        _rerun()
+                        st.rerun()
                 with c4:
                     if st.button("⭐", key=f"fav_evt_{idx}", help="Pin to quick access"):
                         add_favorite(evt_slug, evt_name)
-                        _rerun()
+                        st.rerun()
 
         with st.expander("🐛 Debug: Raw event search results", expanded=False):
             st.json(st.session_state.event_search_results[:5])
@@ -1289,7 +1279,7 @@ if client and st.session_state.dataops_connected:
             st.session_state.api_accounts_raw = []
             st.session_state.account_source_events = {}
             st.session_state.pop("event_filter_state", None)
-            _rerun()
+            st.rerun()
 
         st.divider()
         st.caption("**Event actions**")
@@ -1312,7 +1302,7 @@ if client and st.session_state.dataops_connected:
             with c2:
                 if st.button("❌ Cancel", key="cancel_rerun", use_container_width=True):
                     st.session_state._confirm_rerun_pipeline = False
-                    _rerun()
+                    st.rerun()
 
         if st.button("🗑️ Clear event selection", key="clear_event"):
             st.session_state.selected_event_slug = None
@@ -1320,7 +1310,7 @@ if client and st.session_state.dataops_connected:
             st.session_state.api_accounts_raw = []
             st.session_state.event_search_results = []
             st.session_state.account_source_events = {}
-            _rerun()
+            st.rerun()
 
 else:
     st.info("Populate the DATAOPS_API_TOKEN secret to enable event search.")
@@ -1392,7 +1382,7 @@ if accounts:
         if email_search:
             if st.button("X", key="clear_search", help="Clear search", use_container_width=True):
                 st.session_state.search_clear_count += 1
-                _rerun()
+                st.rerun()
 
     # --- Event source filter ---
     source_events = st.session_state.get("account_source_events", {})
@@ -1431,20 +1421,21 @@ if accounts:
             for acc in visible_accounts:
                 st.session_state.selected_accounts.add(acc["account_id"])
                 st.session_state[f"acc_{acc['account_id']}"] = True
-            _rerun()
+            st.rerun()
     with col_sel_none:
         if st.button("Select none", use_container_width=True):
             st.session_state.selected_accounts = set()
             for acc in accounts:
                 st.session_state[f"acc_{acc['account_id']}"] = False
-            _rerun()
+            st.rerun()
 
     _results_by_account = {}
     for r in st.session_state.results:
         _results_by_account[r["account_id"]] = r
 
     selected_count = len(st.session_state.selected_accounts)
-    with st.expander(f"👥 Select accounts ({selected_count}/{len(visible_accounts)} selected)", expanded=True):
+    st.markdown(f":material/manage_accounts: **Select accounts** ({selected_count}/{len(visible_accounts)} selected)")
+    with st.container(border=True, height=400):
         if not visible_accounts:
             st.caption("No accounts match the search.")
         for acc in visible_accounts:
@@ -1489,11 +1480,10 @@ st.info("🔑 Using key-pair auth via EMERGENCY_SERVICE_USER (REST API)")
 # Target user selector
 if st.session_state.get("target_user") not in ("USER", "ADMIN", "Custom"):
     st.session_state["target_user"] = "USER"
-st.radio(
+st.segmented_control(
     "Target user",
     options=["USER", "ADMIN", "Custom"],
     key="target_user",
-    horizontal=True,
     help="Which Snowflake user to target for service operations (e.g. password reset, MFA bypass)",
 )
 if st.session_state.get("target_user") == "Custom":
@@ -1506,8 +1496,6 @@ if st.session_state.get("target_user") == "Custom":
 
 selected_services = []
 
-st.markdown("---")
-
 with st.container():
     rendered_groups = set()
     for svc_key, svc in SERVICES.items():
@@ -1517,7 +1505,7 @@ with st.container():
             rendered_groups.add(group_id)
             grp = SERVICE_GROUPS.get(group_id, {})
             group_svcs = [(k, v) for k, v in SERVICES.items() if v.get("group") == group_id]
-            with st.container():
+            with st.container(border=True):
                 st.markdown(f"{grp.get('icon', '')} **{grp.get('label', group_id)}**")
                 st.caption(grp.get("description", ""))
                 for g_key, g_svc in group_svcs:
@@ -1542,35 +1530,34 @@ with st.container():
                         st.session_state.active_services.add(g_key)
                     else:
                         st.session_state.active_services.discard(g_key)
-            st.markdown("---")
             continue
 
         if group_id:
             continue
 
-        col1, col2 = st.columns([1, 8])
-        with col1:
-            checked = st.checkbox(
-                "enable",
-                key=f"svc_{svc_key}",
-                value=svc_key in st.session_state.active_services,
-                label_visibility="collapsed"
-            )
-        with col2:
-            st.markdown(f"{svc['icon']} **{svc['label']}**")
-            st.caption(svc["description"])
-            if "render_config" in svc:
-                svc["render_config"]()
-            if "get_preview" in svc:
-                with st.expander("View SQL"):
-                    st.code(svc["get_preview"](), language="sql")
+        with st.container(border=True):
+            col1, col2 = st.columns([1, 8])
+            with col1:
+                checked = st.checkbox(
+                    "enable",
+                    key=f"svc_{svc_key}",
+                    value=svc_key in st.session_state.active_services,
+                    label_visibility="collapsed"
+                )
+            with col2:
+                st.markdown(f"{svc['icon']} **{svc['label']}**")
+                st.caption(svc["description"])
+                if "render_config" in svc:
+                    svc["render_config"]()
+                if "get_preview" in svc:
+                    with st.expander("View SQL"):
+                        st.code(svc["get_preview"](), language="sql")
 
-        if checked:
-            selected_services.append(svc_key)
-            st.session_state.active_services.add(svc_key)
-        else:
-            st.session_state.active_services.discard(svc_key)
-        st.markdown("---")
+            if checked:
+                selected_services.append(svc_key)
+                st.session_state.active_services.add(svc_key)
+            else:
+                st.session_state.active_services.discard(svc_key)
 
 # =============================================================================
 # Section 4: Apply
@@ -1644,7 +1631,7 @@ if st.button(
         args=(selected_accounts_list, service_configs, parallel, max_workers, client, st.session_state.get("selected_event_slug")),
         daemon=True,
     ).start()
-    _rerun()
+    st.rerun()
 
 # --- Live progress + cancel ---
 if _apply_job["running"]:
@@ -1667,14 +1654,14 @@ if _apply_job["running"]:
         _apply_job["cancel"].set()
 
     time.sleep(0.4)
-    _rerun()
+    st.rerun()
 
 elif st.session_state.get("_collecting_apply_results"):
     with _apply_lock:
         finished_results = list(_apply_job["results"])
     st.session_state.results = finished_results
     st.session_state._collecting_apply_results = False
-    _rerun()
+    st.rerun()
 
 # =============================================================================
 # Section 5: Results
@@ -1695,11 +1682,10 @@ if st.session_state.results:
     if st.session_state.get("results_filter") not in ("All", "Success", "Failure"):
         st.session_state["results_filter"] = "All"
 
-    st.radio(
+    st.segmented_control(
         "Show",
         options=["All", "Success", "Failure"],
         key="results_filter",
-        horizontal=True,
     )
 
     results_filter = st.session_state.get("results_filter") or "All"
@@ -1761,9 +1747,10 @@ if st.session_state.results:
             + (f" -- {result['url']}" if result.get("url") else "")
             + f" -- {status}",
             expanded=not result["success"],
+            icon=icon,
         ):
             if result["error"]:
-                st.error(f"Connection error: {result['error']}")
+                st.error(f"Connection error: {result['error']}", icon=":material/error:")
             else:
                 for svc_key, svc_result in result["services"].items():
                     svc = SERVICES[svc_key]
@@ -1785,16 +1772,16 @@ if st.session_state.results:
                             else:
                                 st.markdown(f":red-badge[{fail} failed] {svc['icon']} {svc['label']} ({ok}/{len(stmt_results)} passed)")
                             for j, sr in enumerate(stmt_results):
-                                status_sr = "OK" if sr["success"] else "FAIL"
+                                status_sr = "✅" if sr["success"] else "❌"
                                 preview = sr.get("sql", "").replace('\n', ' ').strip()[:60]
-                                st.markdown(f"**[{status_sr}]** `{preview}`")
-                                if sr.get("error"):
-                                    st.error(sr["error"])
-                                if sr["success"] and sr.get("columns") and sr.get("rows"):
-                                    df = pd.DataFrame(sr["rows"], columns=sr["columns"])
-                                    st.dataframe(df, use_container_width=True)
-                                elif sr["success"]:
-                                    st.caption("Executed successfully (no result set)")
+                                with st.expander(f"{status_sr} `{preview}`", expanded=not sr["success"]):
+                                    if sr.get("error"):
+                                        st.error(sr["error"], icon=":material/error:")
+                                    if sr["success"] and sr.get("columns") and sr.get("rows"):
+                                        df = pd.DataFrame(sr["rows"], columns=sr["columns"])
+                                        st.dataframe(df, use_container_width=True, hide_index=True)
+                                    elif sr["success"]:
+                                        st.caption("Executed successfully (no result set)")
                         elif svc_result.get("error"):
                             st.error(f"Custom SQL error: {svc_result['error']}")
                     else:
