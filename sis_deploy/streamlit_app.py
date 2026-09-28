@@ -8,10 +8,8 @@ import re
 import json
 import time
 import threading
-import _snowflake
 import pandas as pd
 import streamlit as st
-from snowflake.snowpark.context import get_active_session
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional
 
@@ -41,7 +39,7 @@ st.set_page_config(
 
 @st.cache_resource
 def _get_session():
-    return get_active_session()
+    return st.connection("snowflake").session()
 
 
 def _run_local_sql(sql, params=None):
@@ -57,7 +55,7 @@ def _run_local_sql(sql, params=None):
 
 def _get_secret(name: str) -> str:
     try:
-        val = _snowflake.get_generic_secret_string(name)
+        val = st.secrets.get(name, '')
         return val if val and val != 'PLACEHOLDER' else ''
     except Exception:
         return ''
@@ -1507,6 +1505,8 @@ if st.session_state.get("target_user") == "Custom":
     )
 
 selected_services = []
+
+st.markdown("---")
 
 with st.container():
     rendered_groups = set()

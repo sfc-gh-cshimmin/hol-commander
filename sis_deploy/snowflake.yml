@@ -1,0 +1,21 @@
+definition_version: 2
+entities:
+  hol_commander_v2:
+    type: streamlit
+    identifier:
+      name: HOL_COMMANDER_V2
+      database: GRE_APPS
+      schema: HOL_COMMANDER_APP
+    query_warehouse: HOL_COMMANDER_WH
+    runtime_name: SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
+    compute_pool: SYSTEM_COMPUTE_POOL_CPU
+    external_access_integrations:
+      - HOL_COMMANDER_EAI
+    secrets:
+      HOL_PRIVATE_KEY: GRE_APPS.HOL_COMMANDER_APP.HOL_PRIVATE_KEY
+      DATAOPS_API_TOKEN: GRE_APPS.HOL_COMMANDER_APP.DATAOPS_API_TOKEN
+      HOL_PASSWORD: GRE_APPS.HOL_COMMANDER_APP.HOL_PASSWORD
+      HOL_TEMP_PASSWORD: GRE_APPS.HOL_COMMANDER_APP.HOL_TEMP_PASSWORD
+    main_file: streamlit_app.py
+    artifacts:
+      - streamlit_app.py
