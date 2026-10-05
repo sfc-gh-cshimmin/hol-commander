@@ -1509,6 +1509,7 @@ if client and st.session_state.dataops_connected:
 
     # --- Event Search ---
     st.caption("**Search events**")
+    include_decommissioned = st.toggle("Include decommissioned events", value=False, key="include_decommissioned_events")
     event_search_query = st.text_input(
         "Search events",
         placeholder="Search by event name...",
@@ -1550,10 +1551,13 @@ if client and st.session_state.dataops_connected:
                     pass
             return False
 
-        active_results = [
-            evt for evt in st.session_state.event_search_results
-            if not _is_decommissioned_event(evt)
-        ]
+        if include_decommissioned:
+            active_results = st.session_state.event_search_results
+        else:
+            active_results = [
+                evt for evt in st.session_state.event_search_results
+                if not _is_decommissioned_event(evt)
+            ]
         show_results = bool(active_results) and not st.session_state.selected_event_slug and not st.session_state.selected_accounts
         with st.expander(f"Search results ({len(active_results)})", expanded=show_results, icon=":material/list:"):
             for idx, evt in enumerate(active_results):
