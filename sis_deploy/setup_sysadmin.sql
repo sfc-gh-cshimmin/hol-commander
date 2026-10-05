@@ -382,9 +382,7 @@ CREATE OR REPLACE STREAMLIT GRE_APPS.HOL_COMMANDER_APP.HOL_COMMANDER_V2
 --    (Can also be done by ACCOUNTADMIN if SYSADMIN doesn't own the secrets)
 --
 --  ALTER SECRET GRE_APPS.HOL_COMMANDER_APP.HOL_PRIVATE_KEY
---      SET SECRET_STRING = '-----BEGIN PRIVATE KEY-----
---  MIIEv...
---  -----END PRIVATE KEY-----';
+--      SET SECRET_STRING = '<paste PEM private key here>';
 --
 --  ALTER SECRET GRE_APPS.HOL_COMMANDER_APP.DATAOPS_API_TOKEN
 --      SET SECRET_STRING = 'glpat-xxxxxxxxxxxxxxxxxxxx';
